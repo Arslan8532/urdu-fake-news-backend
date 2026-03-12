@@ -1,0 +1,4 @@
+.env
+firebase_admin_key.json
+__pycache__/
+*.pyc
