@@ -21,9 +21,6 @@ def load_model():
     """
     global _tokenizer, _model, _device, _label_map
 
-    if _model is not None and _tokenizer is not None:
-        return
-
     repo = os.getenv("MODEL_REPO", "MAJ853212/xlm_roberta_fake_news_detection")
 
     print(f"[model] Loading tokenizer from {repo} …")
@@ -53,7 +50,7 @@ def predict(text: str) -> dict:
     Returns: { "label": "Real"|"Fake", "confidence": 0‒100 }
     """
     if _model is None or _tokenizer is None:
-        load_model()
+        raise RuntimeError("Model not loaded. Call load_model() first.")
 
     # ── Step 1: Tokenize ─────────────────────────────────────────
     inputs = _tokenizer(

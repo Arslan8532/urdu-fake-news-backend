@@ -2,3 +2,37 @@
 firebase_admin_key.json
 __pycache__/
 *.pyc
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment variables
+.env.*
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Render build artifacts
+.render-build/
+
+# Jupyter
+*.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Test cache
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Misc
+*.bak
+*.swp

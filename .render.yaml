@@ -1,0 +1,18 @@
+# Render.com deployment configuration for FastAPI
+services:
+  - type: web
+    name: urdu-fake-news-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host=0.0.0.0 --port=10000
+    envVars:
+      - key: PORT
+        value: 10000
+      # Add your environment variables here, or set them in the Render dashboard
+      # - key: FIREBASE_CREDENTIALS
+      #   value: firebase_admin_key.json
+      # - key: MODEL_REPO
+      #   value: MAJ853212/xlm_roberta_fake_news_detection
+      # - key: TAVILY_API_KEY
+      #   value: <your-tavily-api-key>

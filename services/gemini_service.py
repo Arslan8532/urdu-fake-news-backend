@@ -1,38 +1,107 @@
 """
-Gemini Verification Service
-Uses Google's Gemini API to verify news articles by cross-referencing
-with web knowledge. Acts as a second verification layer after the ML model.
+Verification Service (Tavily + Groq)
+Uses Tavily for web evidence retrieval and Groq for final fact-check reasoning.
+Keeps verify_news(...) return format unchanged for existing routes/storage.
 """
 
-import os
 import json
-import time
+import os
+from typing import List, Tuple
+
 import requests
+from tavily import TavilyClient
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
-
-# ── Cooldown: skip Gemini for 60s after a rate-limit hit ─────────
-_cooldown_until = 0.0
-_COOLDOWN_SECONDS = 60
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 _FALLBACK = {
     "verdict": "Uncertain",
-    "explanation": "Gemini verification could not be completed.",
+    "explanation": "LLM verification could not be completed.",
     "sources": "",
 }
 
 
-def _get_api_key() -> str:
-    key = os.getenv("GEMINI_API_KEY", "")
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY is not set in .env")
-    return key
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is not set in .env")
+    return value
+
+
+def _safe_json_loads(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    return json.loads(cleaned)
+
+
+def _search_web_evidence(news_text: str) -> Tuple[str, List[str]]:
+    tavily_key = _required_env("TAVILY_API_KEY")
+    client = TavilyClient(tavily_key)
+    result = client.search(
+        query=news_text,
+        topic="news",
+        search_depth="advanced",
+        max_results=5,
+    )
+
+    evidence_lines: List[str] = []
+    urls: List[str] = []
+    for i, item in enumerate(result.get("results", [])[:5], start=1):
+        title = str(item.get("title", "")).strip()
+        content = str(item.get("content", "")).strip()
+        url = str(item.get("url", "")).strip()
+        evidence_lines.append(f"{i}. Title: {title}\nSnippet: {content}")
+        if url:
+            urls.append(url)
+
+    return "\n\n".join(evidence_lines), urls
+
+
+def _verify_with_groq(news_text: str, evidence_text: str) -> dict:
+    groq_key = _required_env("GROQ_API_KEY")
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    prompt = (
+        "You are a fact-checking assistant for Urdu news.\n"
+        "Use the web evidence to classify the claim as Real, Fake, or Uncertain.\n"
+        "Rules:\n"
+        "1. If evidence is conflicting or weak, return Uncertain.\n"
+        "2. If major claim contradicts reliable reporting, return Fake.\n"
+        "3. If claim is well supported by evidence, return Real.\n"
+        "4. Return JSON only, no markdown and no extra text.\n\n"
+        "JSON schema:\n"
+        '{"verdict":"Real|Fake|Uncertain","explanation":"2-3 short sentences in English",'
+        '"sources":"comma-separated source URLs"}\n\n'
+        f"News text:\n{news_text}\n\n"
+        f"Web evidence:\n{evidence_text}\n"
+    )
+
+    payload = {
+        "model": groq_model,
+        "temperature": 0.1,
+        "max_tokens": 512,
+        "messages": [
+            {"role": "system", "content": "Return strict JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return _safe_json_loads(content)
 
 
 def verify_news(news_text: str) -> dict:
     """
-    Ask Gemini to verify whether the given Urdu news text is real or fake
-    based on its web knowledge.
+    Verify whether the given Urdu news text is real/fake using Tavily + Groq.
 
     Returns: {
         "verdict": "Real" | "Fake" | "Uncertain",
@@ -40,91 +109,23 @@ def verify_news(news_text: str) -> dict:
         "sources": "..."
     }
     """
-    global _cooldown_until
-
-    # Skip immediately if we were recently rate-limited
-    if time.time() < _cooldown_until:
-        remaining = int(_cooldown_until - time.time())
-        print(f"[gemini] Skipped — cooldown active ({remaining}s left)")
-        return _FALLBACK
-
-    api_key = _get_api_key()
-
-    prompt = (
-        "You are a fact-checking assistant. A user has submitted the following Urdu news article. "
-        "Your job is to determine whether this news is REAL or FAKE based on your knowledge and "
-        "information available on the web.\n\n"
-        "IMPORTANT RULES:\n"
-        "1. Analyze the claims made in the news text carefully.\n"
-        "2. Cross-reference with known facts, events, and reliable sources.\n"
-        "3. If the news contains false claims, exaggerations, or misinformation, classify it as Fake.\n"
-        "4. If the news is factually accurate based on available information, classify it as Real.\n"
-        "5. Respond ONLY with a valid JSON object in this exact format (no markdown, no code fences):\n"
-        '{"verdict": "Real" or "Fake", "explanation": "Brief explanation in English (2-3 sentences)", '
-        '"sources": "Mention any known sources or events that support your verdict"}\n\n'
-        f"NEWS TEXT:\n{news_text}\n\n"
-        "JSON RESPONSE:"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 512,
-        },
-    }
-
     try:
-        retries = 2
-        for attempt in range(retries):
-            response = requests.post(
-                f"{GEMINI_API_URL}?key={api_key}",
-                json=payload,
-                timeout=30,
-            )
-            if response.status_code == 429:
-                if attempt < retries - 1:
-                    print(f"[gemini] Rate limited (429). Retrying in 5s (attempt {attempt + 1}/{retries})...")
-                    time.sleep(5)
-                    continue
-                # All retries exhausted — activate cooldown
-                _cooldown_until = time.time() + _COOLDOWN_SECONDS
-                print(f"[gemini] Rate limited — entering {_COOLDOWN_SECONDS}s cooldown")
-                return _FALLBACK
-            response.raise_for_status()
-            break
+        evidence_text, urls = _search_web_evidence(news_text)
+        parsed = _verify_with_groq(news_text, evidence_text)
 
-        data = response.json()
-        text_response = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-            .strip()
-        )
+        verdict = str(parsed.get("verdict", "Uncertain")).strip()
+        if verdict not in ("Real", "Fake", "Uncertain"):
+            verdict = "Uncertain"
 
-        # Clean up markdown code fences if Gemini wraps the response
-        if text_response.startswith("```"):
-            text_response = text_response.strip("`").strip()
-            if text_response.startswith("json"):
-                text_response = text_response[4:].strip()
-
-        parsed = json.loads(text_response)
-
-        verdict = parsed.get("verdict", "").strip()
-        if verdict not in ("Real", "Fake"):
-            verdict = "Fake"  # fail-safe: treat uncertain as fake
+        sources = str(parsed.get("sources", "")).strip()
+        if not sources and urls:
+            sources = ", ".join(urls)
 
         return {
             "verdict": verdict,
-            "explanation": parsed.get("explanation", ""),
-            "sources": parsed.get("sources", ""),
+            "explanation": str(parsed.get("explanation", "")).strip(),
+            "sources": sources,
         }
-
-    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"[gemini] Verification failed: {e}")
+    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError, RuntimeError) as e:
+        print(f"[verify] Tavily+Groq verification failed: {e}")
         return _FALLBACK

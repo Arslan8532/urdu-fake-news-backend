@@ -4,45 +4,28 @@ Verifies Firebase ID tokens sent from the React frontend.
 Extracts the user's UID so every endpoint knows who is calling.
 """
 
-import base64
-import json
 import os
 import firebase_admin
 from firebase_admin import auth, credentials
 from fastapi import Request, HTTPException
 
 
-def _load_firebase_credentials() -> credentials.Base | None:
-    credentials_json = os.getenv("FIREBASE_CREDENTIALS_JSON", "").strip()
-    if credentials_json:
-        return credentials.Certificate(json.loads(credentials_json))
-
-    credentials_base64 = os.getenv("FIREBASE_CREDENTIALS_BASE64", "").strip()
-    if credentials_base64:
-        decoded = base64.b64decode(credentials_base64).decode("utf-8")
-        return credentials.Certificate(json.loads(decoded))
-
-    cred_path = os.getenv("FIREBASE_CREDENTIALS", "firebase_admin_key.json")
-    if os.path.exists(cred_path):
-        return credentials.Certificate(cred_path)
-
-    return None
-
-
-def init_firebase():
     """Initialise Firebase Admin SDK (called once at startup)."""
     if firebase_admin._apps:
         return  # already initialised
 
-    cred = _load_firebase_credentials()
+    cred_path = os.getenv("FIREBASE_CREDENTIALS", "firebase_admin_key.json")
 
-    if cred is not None:
+    if os.path.exists(cred_path):
+        cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred)
     else:
         # Falls back to Application Default Credentials (useful in Cloud Run / GCE)
         firebase_admin.initialize_app()
 
     print("[auth] Firebase Admin SDK initialised")
+
+    # On Render.com, set FIREBASE_CREDENTIALS as an environment variable and upload the key file via the dashboard or use Application Default Credentials.
 
 
 async def get_current_user(request: Request) -> str:
